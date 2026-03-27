@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+<meta name="apple-mobile-web-app-title" content="NatyaSpace"/>
+<meta name="theme-color" content="#F5EDE0"/>
+<title>NatyaSpace — Sign in</title>
+<link rel="manifest" href="manifest.json"/>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<div class="app">
+  <div class="login-wrap">
+    <div class="login-logo">Natya<span>Space</span></div>
+    <div class="login-card">
+      <div id="login-err" class="login-err" style="display:none"></div>
+      <div class="form-field">
+        <label>Email</label>
+        <input id="li-email" type="email" placeholder="you@email.com" autocomplete="email"/>
+      </div>
+      <div class="form-field">
+        <label>Password</label>
+        <input id="li-pass" type="password" placeholder="••••••••" autocomplete="current-password"/>
+      </div>
+      <button class="btn btn-primary btn-full" id="signin-btn" style="margin-top:4px">Sign in</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { sb } from './supabase.js';
+
+// If already logged in, redirect immediately
+const { data: { session } } = await sb.auth.getSession();
+if (session) {
+  const { data: prof } = await sb.from('profiles').select('role').eq('id', session.user.id).single();
+  window.location.replace(prof?.role === 'student' ? './student.html' : './app.html');
+}
+
+async function doLogin() {
+  const email = document.getElementById('li-email').value.trim();
+  const pass  = document.getElementById('li-pass').value;
+  const errEl = document.getElementById('login-err');
+  const btn   = document.getElementById('signin-btn');
+
+  if (!email || !pass) {
+    errEl.style.display = ''; errEl.textContent = 'Please enter your email and password.'; return;
+  }
+  errEl.style.display = 'none';
+  btn.textContent = 'Signing in…'; btn.disabled = true;
+
+  const { error } = await sb.auth.signInWithPassword({ email, password: pass });
+
+  if (error) {
+    errEl.style.display = ''; errEl.textContent = error.message;
+    btn.textContent = 'Sign in'; btn.disabled = false;
+    return;
+  }
+
+  // Auth state change will fire — fetch role and redirect
+  const { data: { session: sess } } = await sb.auth.getSession();
+  const { data: prof } = await sb.from('profiles').select('role').eq('id', sess.user.id).single();
+  window.location.replace(prof?.role === 'student' ? './student.html' : './app.html');
+}
+
+document.getElementById('signin-btn').addEventListener('click', doLogin);
+document.getElementById('li-pass').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="NatyaSpace"/>
+<meta name="theme-color" content="#F5EDE0"/>
+<title>NatyaSpace</title>
+<link rel="manifest" href="manifest.json"/>
+<link rel="stylesheet" href="styles.css"/>
+<style>
+  body{display:flex;align-items:center;justify-content:center;height:100vh;background:var(--bg)}
+  .spinner{width:32px;height:32px;border:2px solid var(--border);border-top-color:var(--tan);border-radius:50%;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="spinner"></div>
+<script type="module">
+import { sb } from './supabase.js';
+
+async function route() {
+  const { data: { session } } = await sb.auth.getSession();
+
+  if (!session) {
+    window.location.replace('./login.html');
+    return;
+  }
+
+  const { data: prof } = await sb.from('profiles')
+    .select('role')
+    .eq('id', session.user.id)
+    .single();
+
+  if (prof?.role === 'student') {
+    window.location.replace('./student.html');
+  } else {
+    window.location.replace('./app.html');
+  }
+}
+
+route();
+</script>
+</body>
+</html>

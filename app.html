@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+<meta name="apple-mobile-web-app-title" content="NatyaSpace"/>
+<meta name="theme-color" content="#F5EDE0"/>
+<title>NatyaSpace</title>
+<link rel="manifest" href="manifest.json"/>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<div id="root"></div>
+<div class="toast" id="toast"></div>
+
+<script type="module">
+import { sb, DAY_NAMES, MONTHS, DAYS_SH, AV_COLORS, GI_COLORS, PIP_C } from './supabase.js';
+import { S, ini, fmtD, fmtM, todayStr, showToast, fees, groupFees, groupMembers, studentGroups, byDate } from './state.js';
+
+// Get the effective rate for a student in a specific group
+// Uses rate_override from group_members if set, otherwise student default rate
+function effectiveRate(gid, sid) {
+  const membership = S.groupMembers.find(m => m.group_id===gid && m.student_id===sid);
+  return membership?.rate_override ?? S.students.find(s=>s.id===sid)?.rate ?? 0;
+}
+
+// ── AUTH GUARD ────────────────────────────────────────────────
+async function init() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) { window.location.replace('./login.html'); return; }
+  S.session = session;
+  const { data: prof } = await sb.from('profiles').select('*').eq('id', session.user.id).single();
+  S.profile = prof;
+  if (prof?.role === 'student') { window.location.replace('./student.html'); return; }
+  await loadAll();
+}
+
+async function loadAll() {
+  S.loading = true; R();
+  const [st,se,pa,gr,gm,vi] = await Promise.all([
+    sb.from('students').select('*').order('name'),
+    sb.from('sessions').select('*').order('date',{ascending:false}),
+    sb.from('payments').select('*').order('date',{ascending:false}),
+    sb.from('groups').select('*').order('name'),
+    sb.from('group_members').select('*'),
+    sb.from('videos').select('*').order('created_at',{ascending:false}),
+  ]);
+  S.students=st.data||[]; S.sessions=se.data||[]; S.payments=pa.data||[];
+  S.groups=gr.data||[]; S.groupMembers=gm.data||[]; S.videos=vi.data||[];
+  S.loading=false; R();
+}
+
+// ── ROUTER ────────────────────────────────────────────────────
+// We use the URL hash: #overview, #students, #students/42, #groups, #groups/7, etc.
+// This gives real browser back-button support.
+
+function getRoute() {
+  const hash = window.location.hash.replace('#','') || 'overview';
+  const parts = hash.split('/');
+  return { page: parts[0], id: parts[1] ? parseInt(parts[1]) : null };
+}
+
+function navigate(hash) {
+  window.location.hash = hash;
+}
+
+window.addEventListener('hashchange', () => R());
+
+// ── RENDER ────────────────────────────────────────────────────
+function R() {
+  document.getElementById('root').innerHTML = buildApp();
+  bind();
+}
+
+function buildApp() {
+  if (S.loading) return `<div class="app"><div class="main" style="display:flex;align-items:center;justify-content:center;height:100vh"><div class="loading"><div class="spinner"></div>Loading NatyaSpace…</div></div></div>`;
+
+  const { page, id } = getRoute();
+  const tabs = [['overview','◎','Overview'],['students','◉','Students'],['groups','◫','Groups'],['calendar','▦','Calendar'],['payments','◈','Payments'],['practice','♪','Practice']];
+
+  return `<div class="app">
+    <div class="header">
+      <div class="header-inner">
+        <div class="logo">Natya<span>Space</span></div>
+        <div class="header-actions">
+          <button class="btn btn-ghost btn-sm" onclick="OM('logClass',null)">+ Class</button>
+          <button class="btn btn-primary btn-sm" onclick="OM('addStudent',null)">+ Student</button>
+          <button class="btn btn-ghost btn-sm" onclick="doLogout()" style="color:var(--text3)">Sign out</button>
+        </div>
+      </div>
+    </div>
+    <div class="app-body">
+      <nav class="bottom-nav">
+        ${tabs.map(([t,ic,lb])=>`
+        <button class="nav-item ${page===t&&!id?'active':''}" onclick="navigate('#${t}')">
+          <span class="nav-icon">${ic}</span>${lb}
+        </button>`).join('')}
+      </nav>
+      <div class="main">${buildContent(page, id)}</div>
+    </div>
+    ${S.modal ? buildModal() : ''}
+  </div>`;
+}
+
+function buildContent(page, id) {
+  if (page==='students' && id) return buildStudentDetail(id);
+  if (page==='groups'   && id) return buildGroupDetail(id);
+  if (page==='overview')  return buildOverview();
+  if (page==='students')  return buildStudents();
+  if (page==='groups')    return buildGroups();
+  if (page==='calendar')  return buildCalendar();
+  if (page==='payments')  return buildPayments();
+  if (page==='practice')  return buildPractice();
+  return buildOverview();
+}
+
+// ── OVERVIEW ──────────────────────────────────────────────────
+function buildOverview(){
+  const te=S.students.reduce((a,s)=>a+fees(s.id).earned,0);
+  const tp=S.students.reduce((a,s)=>a+fees(s.id).paid,0);
+  return`
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-val v-tan">${fmtM(te)}</div><div class="stat-label">Total earned</div></div>
+    <div class="stat-card"><div class="stat-val v-green">${fmtM(tp)}</div><div class="stat-label">Received</div></div>
+    <div class="stat-card"><div class="stat-val v-red">${fmtM(te-tp)}</div><div class="stat-label">Outstanding</div></div>
+    <div class="stat-card"><div class="stat-val v-sage">${S.students.length}</div><div class="stat-label">${S.sessions.length} classes</div></div>
+  </div>
+  <div class="section-title">Classes</div>
+  <div class="card" style="margin-bottom:14px">
+    ${S.groups.length===0?`<div class="empty"><div class="empty-icon">🎵</div>No class groups yet</div>`:
+    S.groups.map(g=>{
+      const gf=groupFees(g.id); const mem=groupMembers(g.id);
+      return`<div class="student-row" onclick="navigate('#groups/${g.id}')">
+        <div class="group-icon ${g.color}" style="width:40px;height:40px;border-radius:10px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:18px">🎵</div>
+        <div class="s-info"><div class="s-name">${g.name}</div><div class="s-meta">${DAY_NAMES[g.day_of_week]}s ${g.time_of_day||''} · ${mem.length} students</div></div>
+        <div class="s-fee">${gf.due>0.01?`<div class="fee-due">${fmtM(gf.due)}</div><div class="fee-lbl">group due</div>`:`<div class="fee-ok">✓ Clear</div>`}</div>
+      </div>`;}).join('')}
+  </div>
+  <div class="section-title">All students</div>
+  <div class="card">
+    ${[...S.students].sort((a,b)=>fees(b.id).due-fees(a.id).due).map(s=>{
+      const f=fees(s.id);
+      return`<div class="student-row" onclick="navigate('#students/${s.id}')">
+        <div class="avatar ${s.color||'av-tan'}">${ini(s.name)}</div>
+        <div class="s-info"><div class="s-name">${s.name}</div><div class="s-meta">${fmtM(s.rate)}/hr · ${f.sess.length} classes</div></div>
+        <div class="s-fee">${f.due>0.01?`<div class="fee-due">${fmtM(f.due)}</div><div class="fee-lbl">due</div>`:`<div class="fee-ok">✓ Clear</div>`}</div>
+      </div>`;}).join('')}
+  </div>`;
+}
+
+// ── STUDENTS ──────────────────────────────────────────────────
+function buildStudents(){
+  return`
+  <div class="section-title" style="margin-top:16px">All students (${S.students.length})</div>
+  <div class="card">
+    ${S.students.length===0?`<div class="empty"><div class="empty-icon">🎵</div>No students yet</div>`:
+    S.students.map(s=>{
+      const f=fees(s.id); const grps=studentGroups(s.id);
+      return`<div class="student-row" onclick="navigate('#students/${s.id}')">
+        <div class="avatar ${s.color||'av-tan'}">${ini(s.name)}</div>
+        <div class="s-info"><div class="s-name">${s.name}</div><div class="s-meta">${grps.length?grps.map(g=>g.name).join(', '):(s.notes||'No group')}</div></div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="badge ${f.due>0.01?'badge-red':'badge-green'}">${f.due>0.01?fmtM(f.due)+' due':'Paid'}</span>
+          <button class="btn btn-ghost btn-icon btn-sm" onclick="event.stopPropagation();delStudent(${s.id})">✕</button>
+        </div>
+      </div>`;}).join('')}
+  </div>`;
+}
+
+// ── STUDENT DETAIL ────────────────────────────────────────────
+function buildStudentDetail(sid){
+  const s=S.students.find(st=>st.id===sid); if(!s) return `<div class="empty">Student not found. <a href="#students">Back</a></div>`;
+  const f=fees(sid); const pays=S.payments.filter(p=>p.student_id===sid);
+  const grps=studentGroups(sid);
+  const svids=S.videos.filter(v=>v.student_id===sid);
+  const sessRows=[...f.sess].map(sess=>{
+    const grp=S.groups.find(g=>g.id===sess.group_id);
+    return`<div class="sess-item">
+      <div><div class="sess-date">${fmtD(sess.date)}</div><div class="sess-hrs">${sess.hours}hr${grp?` · ${grp.name}`:''}</div></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="sess-fee" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" onclick="OM('editSession',{id:${sess.id},fee:${sess.fee},hours:${sess.hours},rate:${sess.rate_snapshot},date:'${sess.date}',grp:'${grp?.name||''}'})" title="Click to edit">${fmtM(sess.fee)}</span>
+        <button class="btn btn-danger btn-icon btn-sm" onclick="delSession(${sess.id})">✕</button>
+      </div>
+    </div>`;}).join('');
+  const payRows=[...pays].map(p=>`
+    <div class="pay-item">
+      <div><div style="font-weight:500">${fmtM(p.amount)}</div><div style="font-size:12px;color:var(--text3)">${p.note||fmtD(p.date)}</div></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:12px;color:var(--text3)">${fmtD(p.date)}</span>
+        <button class="btn btn-danger btn-icon btn-sm" onclick="delPayment(${p.id})">✕</button>
+      </div>
+    </div>`).join('');
+  return`
+  <div style="padding:14px 0 0"><button class="btn btn-ghost btn-sm" onclick="history.back()">← Back</button></div>
+  <div class="detail-hero">
+    <div class="detail-av ${s.color||'av-tan'}">${ini(s.name)}</div>
+    <div>
+      <div class="detail-name">${s.name}</div>
+      <div class="detail-sub">${s.notes||''} · ${fmtM(s.rate)}/hr</div>
+      ${grps.length?`<div style="margin-top:5px;display:flex;gap:4px;flex-wrap:wrap">${grps.map(g=>`<span class="badge badge-tan">${g.name}</span>`).join('')}</div>`:''}
+      ${s.user_id?`<div style="margin-top:4px"><span class="badge badge-green">Has login</span></div>`:`<div style="margin-top:4px"><span class="badge" style="background:var(--linen);color:var(--text3)">No login yet</span></div>`}
+    </div>
+  </div>
+  <div class="balance-bar">
+    <div class="bal-cell"><div class="bal-val v-tan">${fmtM(f.earned)}</div><div class="bal-lbl">Earned</div></div>
+    <div class="bal-cell"><div class="bal-val v-green">${fmtM(f.paid)}</div><div class="bal-lbl">Paid</div></div>
+    <div class="bal-cell"><div class="bal-val" style="color:${f.due>0.01?'var(--red)':'var(--green)'}">${fmtM(f.due)}</div><div class="bal-lbl">Due</div></div>
+  </div>
+  <div class="action-strip">
+    <button class="btn btn-primary btn-sm" onclick="OM('logClass',${sid})">+ Log class</button>
+    <button class="btn btn-sage btn-sm" onclick="OM('logPayment',${sid})">+ Payment</button>
+    <button class="btn btn-ghost btn-sm" onclick="OM('editStudent',${sid})">Edit</button>
+    <button class="btn btn-ghost btn-sm" onclick="OM('inviteStudent',${sid})">Invite login</button>
+  </div>
+  <div class="section-title" style="padding:14px 0 0">Classes</div>
+  <div class="card" style="margin-bottom:12px">
+    ${f.sess.length===0?`<div class="empty"><div class="empty-icon">🩰</div>No classes logged</div>`:sessRows}
+  </div>
+  <div class="section-title">Payments</div>
+  <div class="card" style="margin-bottom:12px">
+    ${pays.length===0?`<div class="empty"><div class="empty-icon">💸</div>No payments recorded</div>`:payRows}
+  </div>
+  <div class="section-title">Videos for ${s.name}</div>
+  <div style="margin-bottom:16px">
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('vid-upload-${sid}').click()">
+        <input type="file" id="vid-upload-${sid}" accept="video/*" style="display:none" onchange="uploadVideo(this,${sid},null)"/>
+        🎬 Upload file
+      </button>
+      <button class="btn btn-ghost btn-sm" onclick="OM('addYouTube',{studentId:${sid},groupId:null})">▶ YouTube link</button>
+    </div>
+    ${svids.map(v=>buildVideoCard(v)).join('')}
+  </div>`;
+}
+
+// ── GROUPS ────────────────────────────────────────────────────
+function buildGroups(){
+  return`
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;margin-bottom:10px">
+    <div class="section-title" style="margin:0">Class groups (${S.groups.length})</div>
+    <button class="btn btn-primary btn-sm" onclick="OM('addGroup',null)">+ New group</button>
+  </div>
+  ${S.groups.length===0?`<div class="card"><div class="empty"><div class="empty-icon">🎵</div>No class groups yet</div></div>`:
+  S.groups.map(g=>{
+    const gf=groupFees(g.id); const mem=groupMembers(g.id);
+    return`<div class="group-card" onclick="navigate('#groups/${g.id}')">
+      <div class="group-header">
+        <div class="group-icon ${g.color}">🎵</div>
+        <div class="group-info"><div class="group-name">${g.name}</div><div class="group-meta">${DAY_NAMES[g.day_of_week]}s at ${g.time_of_day||''} · ${g.style||''} · ${mem.length} student${mem.length!==1?'s':''}</div></div>
+        <button class="btn btn-ghost btn-icon btn-sm" onclick="event.stopPropagation();delGroup(${g.id})">✕</button>
+      </div>
+      <div class="group-stats">
+        <div class="gstat"><div class="gstat-val v-tan">${fmtM(gf.earned)}</div><div class="gstat-lbl">Earned</div></div>
+        <div class="gstat"><div class="gstat-val v-green">${fmtM(gf.paid)}</div><div class="gstat-lbl">Received</div></div>
+        <div class="gstat"><div class="gstat-val" style="color:${gf.due>0.01?'var(--red)':'var(--green)'}">${fmtM(gf.due)}</div><div class="gstat-lbl">Due</div></div>
+      </div>
+    </div>`;}).join('')}`;
+}
+
+// ── GROUP DETAIL ──────────────────────────────────────────────
+function buildGroupDetail(gid){
+  const g=S.groups.find(gr=>gr.id===gid); if(!g) return `<div class="empty">Group not found. <a href="#groups">Back</a></div>`;
+  const gf=groupFees(gid); const members=groupMembers(gid);
+  const grpSess=[...S.sessions.filter(s=>s.group_id===gid)].slice(0,10);
+  const gvids=S.videos.filter(v=>v.group_id===gid);
+  return`
+  <div style="padding:14px 0 0"><button class="btn btn-ghost btn-sm" onclick="history.back()">← Back</button></div>
+  <div class="group-detail-hero">
+    <div class="group-detail-top">
+      <div class="group-icon ${g.color}" style="width:50px;height:50px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">🎵</div>
+      <div><div style="font-family:var(--serif);font-size:20px;font-weight:500">${g.name}</div><div style="font-size:12px;color:var(--text3);margin-top:3px">${DAY_NAMES[g.day_of_week]}s at ${g.time_of_day||''} · ${g.style||''}</div></div>
+      <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="OM('editGroup',${gid})">Edit</button>
+    </div>
+    <div class="group-balance-bar">
+      <div class="grp-bal"><div class="grp-bal-val v-tan">${fmtM(gf.earned)}</div><div class="grp-bal-lbl">Earned</div></div>
+      <div class="grp-bal"><div class="grp-bal-val v-green">${fmtM(gf.paid)}</div><div class="grp-bal-lbl">Received</div></div>
+      <div class="grp-bal"><div class="grp-bal-val" style="color:${gf.due>0.01?'var(--red)':'var(--green)'}">${fmtM(gf.due)}</div><div class="grp-bal-lbl">Due</div></div>
+    </div>
+  </div>
+  <div class="action-strip">
+    <button class="btn btn-primary btn-sm" onclick="OM('logGroupClass',${gid})">+ Log class</button>
+    <button class="btn btn-ghost btn-sm" onclick="OM('addMember',${gid})">+ Add student</button>
+  </div>
+  <div class="section-title" style="padding:14px 0 0">Students (${members.length})</div>
+  <div class="card" style="margin-bottom:12px">
+    ${members.length===0?`<div class="empty"><div class="empty-icon">👥</div>No students yet</div>`:
+    members.map(s=>{const f=fees(s.id);return`<div class="student-row" onclick="navigate('#students/${s.id}')">
+      <div class="avatar ${s.color||'av-tan'}">${ini(s.name)}</div>
+      <div class="s-info"><div class="s-name">${s.name}</div><div class="s-meta">${(()=>{const m=S.groupMembers.find(m=>m.group_id===gid&&m.student_id===s.id);return m?.rate_override!=null?fmtM(m.rate_override)+'/hr (group rate)':fmtM(s.rate)+'/hr';})()}</div></div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="s-fee">${f.due>0.01?`<div class="fee-due" style="font-size:15px">${fmtM(f.due)}</div><div class="fee-lbl">due</div>`:`<div class="fee-ok" style="font-size:14px">✓</div>`}</div>
+        <button class="btn btn-danger btn-icon btn-sm" onclick="event.stopPropagation();removeMember(${gid},${s.id})">✕</button>
+      </div>
+    </div>`;}).join('')}
+  </div>
+  <div class="section-title">Recent sessions</div>
+  <div class="card" style="margin-bottom:12px">
+    ${grpSess.length===0?`<div class="empty"><div class="empty-icon">🩰</div>No sessions yet</div>`:
+    grpSess.map(sess=>{const st=S.students.find(s=>s.id===sess.student_id);return`<div class="sess-item">
+      <div style="display:flex;align-items:center;gap:8px"><div class="avatar ${st?.color||'av-tan'}" style="width:30px;height:30px;font-size:11px">${ini(st?.name)}</div>
+      <div><div class="sess-date" style="font-size:13px">${st?.name}</div><div class="sess-hrs">${fmtD(sess.date)} · ${sess.hours}hr</div></div></div>
+      <div style="display:flex;align-items:center;gap:8px"><span class="sess-fee" style="font-size:14px">${fmtM(sess.fee)}</span>
+      <button class="btn btn-danger btn-icon btn-sm" onclick="delSession(${sess.id})">✕</button></div>
+    </div>`;}).join('')}
+  </div>
+  <div class="section-title">Group videos</div>
+  <div style="margin-bottom:16px">
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('gvid-upload-${gid}').click()">
+        <input type="file" id="gvid-upload-${gid}" accept="video/*" style="display:none" onchange="uploadVideo(this,null,${gid})"/>
+        🎬 Upload file
+      </button>
+      <button class="btn btn-ghost btn-sm" onclick="OM('addYouTube',{studentId:null,groupId:${gid}})">▶ YouTube link</button>
+    </div>
+    ${gvids.map(v=>buildVideoCard(v)).join('')}
+  </div>`;
+}
+
+// ── CALENDAR ──────────────────────────────────────────────────
+function buildCalendar(){
+  const y=S.calY,m=S.calM;
+  const first=new Date(y,m,1),last=new Date(y,m+1,0),sd=first.getDay();
+  const bd=byDate(),td=todayStr();
+  let cells=DAYS_SH.map(d=>`<div class="cal-day-lbl">${d}</div>`).join('');
+  for(let i=0;i<sd;i++){const p=new Date(y,m,1-sd+i);cells+=`<div class="cal-day other"><div class="cal-day-n">${p.getDate()}</div></div>`;}
+  for(let d=1;d<=last.getDate();d++){
+    const ds=`${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const ss=bd[ds]||[];
+    const pips=ss.map(sess=>{const st=S.students.find(s=>s.id===sess.student_id);return`<div class="pip" style="background:${PIP_C[st?.color]||'#C4956A'}"></div>`;}).join('');
+    cells+=`<div class="cal-day ${ds===td?'today':''} ${ss.length?'has-s':''}" onclick="OM('dayDetail','${ds}')">
+      <div class="cal-day-n">${d}</div>${ss.length?`<div class="cal-count">${ss.length}</div>`:''}
+      <div class="pip-row">${pips}</div></div>`;
+  }
+  const rem=7-((sd+last.getDate())%7);
+  if(rem<7) for(let i=1;i<=rem;i++) cells+=`<div class="cal-day other"><div class="cal-day-n">${i}</div></div>`;
+  return`<div class="card" style="margin-top:14px">
+    <div class="cal-nav">
+      <button class="btn btn-ghost btn-sm" onclick="calPrev()">‹</button>
+      <div class="cal-month-title">${MONTHS[m]} ${y}</div>
+      <button class="btn btn-ghost btn-sm" onclick="calNext()">›</button>
+    </div>
+    <div class="cal-grid">${cells}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;padding:12px 16px;border-top:1px solid var(--border)">
+      ${S.students.map(s=>`<div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)"><div class="pip" style="background:${PIP_C[s.color]}"></div>${s.name.split(' ')[0]}</div>`).join('')}
+    </div>
+  </div>`;
+}
+
+// ── PAYMENTS ──────────────────────────────────────────────────
+function buildPayments(){
+  const sorted=[...S.payments].slice(0,50);
+  return`
+  <div style="display:flex;justify-content:flex-end;margin-top:14px;margin-bottom:10px">
+    <button class="btn btn-primary btn-sm" onclick="OM('logPayment',null)">+ Record payment</button>
+  </div>
+  <div class="section-title">Payment history</div>
+  <div class="card">
+    ${sorted.length===0?`<div class="empty"><div class="empty-icon">💸</div>No payments yet</div>`:
+    sorted.map(p=>{const s=S.students.find(st=>st.id===p.student_id);return`
+      <div class="pay-item">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="avatar ${s?.color||'av-tan'}" style="width:32px;height:32px;font-size:11px">${ini(s?.name)}</div>
+          <div><div style="font-weight:500">${s?.name}</div><div style="font-size:12px;color:var(--text3)">${p.note||''} · ${fmtD(p.date)}</div></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-family:var(--serif);font-size:18px;color:var(--green)">${fmtM(p.amount)}</span>
+          <button class="btn btn-danger btn-icon btn-sm" onclick="delPayment(${p.id})">✕</button>
+        </div>
+      </div>`;}).join('')}
+  </div>
+  <div class="section-title" style="margin-top:16px">Balances</div>
+  <div class="card">
+    ${S.students.map(s=>{const f=fees(s.id);return`
+      <div class="pay-item">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="avatar ${s.color||'av-tan'}" style="width:32px;height:32px;font-size:11px">${ini(s.name)}</div>
+          <span style="cursor:pointer;font-weight:500" onclick="navigate('#students/${s.id}')">${s.name}</span>
+        </div>
+        <span style="font-family:var(--serif);font-size:18px;color:${f.due>0.01?'var(--red)':'var(--green)'}">${fmtM(f.due)}</span>
+      </div>`;}).join('')}
+  </div>`;
+}
+
+// ── PRACTICE ──────────────────────────────────────────────────
+function buildPractice(){
+  return`
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;margin-bottom:10px">
+    <div class="section-title" style="margin:0">Practice notes (${S.videos.length})</div>
+    <button class="btn btn-ghost btn-sm" onclick="OM('addYouTube',{studentId:null,groupId:null})">▶ Add YouTube</button>
+  </div>
+  ${S.videos.length===0?`<div class="card"><div class="empty"><div class="empty-icon">🎬</div>No practice notes yet.<br/>Go to a student or group to upload.</div></div>`:
+  `<div class="video-grid">${S.videos.map(v=>{
+    const s=S.students.find(st=>st.id===v.student_id);
+    const g=S.groups.find(gr=>gr.id===v.group_id);
+    return buildVideoCard(v,s,g);
+  }).join('')}</div>`}`;
+}
+
+// ── VIDEO CARD ────────────────────────────────────────────────
+function getYouTubeId(url){
+  if(!url) return null;
+  const m=url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([\w-]{11})/);
+  return m?m[1]:null;
+}
+
+function buildVideoCard(v,s,g){
+  const label=s?s.name:g?g.name:'General';
+  const ytId=getYouTubeId(v.youtube_url||'');
+  const thumbHTML=ytId
+    ?`<img src="https://img.youtube.com/vi/${ytId}/mqdefault.jpg" style="width:100%;height:100%;object-fit:cover" loading="lazy"/><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center"><div style="width:44px;height:44px;background:rgba(0,0,0,.6);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff">▶</div></div>`
+    :`<span style="font-size:40px">▶</span>`;
+  const clickFn=ytId?`openYouTube('${v.youtube_url}')`:`playVideo('${v.file_path}','${v.title||''}')`;
+  const delArgs=ytId?`${v.id},null`:`${v.id},'${v.file_path}'`;
+  const badge=ytId
+    ?`<span class="badge badge-blue" style="font-size:10px">YouTube</span>`
+    :`<span class="badge badge-sage" style="font-size:10px">Video</span>`;
+  return`<div class="video-card">
+    <div class="video-thumb" onclick="${clickFn}" style="position:relative">${thumbHTML}</div>
+    <div class="video-info">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">${badge}<div class="video-title">${v.title||'Untitled'}</div></div>
+      <div class="video-meta">${label} · ${v.created_at?fmtD(v.created_at.slice(0,10)):''}</div>
+      ${v.description?`<div style="font-size:12px;color:var(--text2);margin-top:4px">${v.description}</div>`:''}
+    </div>
+    <div style="padding:0 14px 12px;display:flex;gap:8px">
+      <button class="btn btn-danger btn-sm" onclick="delVideo(${delArgs})">Delete</button>
+    </div>
+  </div>`;
+}
+
+// ── MODALS ────────────────────────────────────────────────────
+function buildModal(){
+  const{type,data}=S.modal;
+  let title='',body='',footer='';
+
+  if(type==='addStudent'||type==='editStudent'){
+    const s=type==='editStudent'?S.students.find(st=>st.id===data):null;
+    title=s?'Edit student':'New student';
+    body=`
+    <div class="form-field"><label>Name</label><input id="m-name" placeholder="Full name" value="${s?.name||''}"/></div>
+    <div class="form-row" style="margin-bottom:14px">
+      <div class="form-field" style="margin:0"><label>Rate ($/hr)</label><input id="m-rate" type="number" min="0" step="5" value="${s?.rate||''}"/></div>
+      <div class="form-field" style="margin:0"><label>Color</label><select id="m-color">
+        ${AV_COLORS.map(c=>`<option value="${c}" ${(s?.color||AV_COLORS[0])===c?'selected':''}>${c.replace('av-','')}</option>`).join('')}
+      </select></div>
+    </div>
+    <div class="form-field"><label>Notes</label><input id="m-notes" placeholder="Style, level…" value="${s?.notes||''}"/></div>`;
+    const btnAction=s?`doEditStudent(${data})`:'doAddStudent()';
+    const btnLabel=s?'Save':'Add student';
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="${btnAction}">${btnLabel}</button>`;
+  }
+
+  if(type==='inviteStudent'){
+    const s=S.students.find(st=>st.id===data);
+    title=`Invite ${s?.name||'student'}`;
+    body=`
+    <p style="font-size:13px;color:var(--text2);margin-bottom:16px">Create a login for ${s?.name} so they can view their classes, attendance, fees and videos.</p>
+    <div class="form-field"><label>Their email</label><input id="m-inv-email" type="email" placeholder="student@email.com"/></div>
+    <div class="form-field"><label>Temporary password</label><input id="m-inv-pass" type="text" value="DanceTracker2025!"/></div>`;
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="doInviteStudent(${data})">Create login</button>`;
+  }
+
+  if(type==='addGroup'||type==='editGroup'){
+    const g=type==='editGroup'?S.groups.find(gr=>gr.id===data):null;
+    title=g?'Edit class group':'New class group';
+    body=`
+    <div class="form-field"><label>Group name</label><input id="m-gname" placeholder="e.g. Sunday Bollywood" value="${g?.name||''}"/></div>
+    <div class="form-row" style="margin-bottom:14px">
+      <div class="form-field" style="margin:0"><label>Day</label><select id="m-gday">
+        ${DAY_NAMES.map((d,i)=>`<option value="${i}" ${(g?.day_of_week??0)===i?'selected':''}>${d}</option>`).join('')}
+      </select></div>
+      <div class="form-field" style="margin:0"><label>Time</label><input id="m-gtime" placeholder="5:00 PM" value="${g?.time_of_day||''}"/></div>
+    </div>
+    <div class="form-row" style="margin-bottom:14px">
+      <div class="form-field" style="margin:0"><label>Style</label><input id="m-gstyle" placeholder="Bollywood…" value="${g?.style||''}"/></div>
+      <div class="form-field" style="margin:0"><label>Color</label><select id="m-gcolor">
+        ${GI_COLORS.map(c=>`<option value="${c}" ${(g?.color||GI_COLORS[0])===c?'selected':''}>${c.replace('gi-','')}</option>`).join('')}
+      </select></div>
+    </div>`;
+    const btnAction=g?`doEditGroup(${data})`:'doAddGroup()';
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="${btnAction}">${g?'Save':'Create group'}</button>`;
+  }
+
+  if(type==='addMember'){
+    const gid=data; const g=S.groups.find(gr=>gr.id===gid);
+    const mem=groupMembers(gid);
+    const nonMembers=S.students.filter(s=>!mem.find(m=>m.id===s.id));
+    if(!S.selectedMemberIds) S.selectedMemberIds=[];
+    title=`Add to ${g?.name||'group'}`;
+    body=nonMembers.length===0?`<div class="empty">All students are already in this group</div>`:
+    `<div class="check-list">${nonMembers.map(s=>{
+      const sel=S.selectedMemberIds.includes(s.id);
+      return`<div class="check-item ${sel?'selected':''}" onclick="toggleMemberSel(${s.id})">
+        <div class="avatar ${s.color||'av-tan'}" style="width:32px;height:32px;font-size:11px">${ini(s.name)}</div>
+        <div class="check-item-name">${s.name}</div>
+        <div class="check-item-meta">${fmtM(s.rate)}/hr</div>
+        <div class="checkmark">${sel?'✓':''}</div>
+      </div>`;}).join('')}</div>`;
+    // Rate override section
+    body += `<div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+      <label style="font-size:11px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:var(--text3);display:block;margin-bottom:8px">Rate for this group (optional)</label>
+      <div style="display:flex;align-items:center;gap:10px">
+        <input id="m-rate-override" type="number" min="0" step="5" placeholder="Leave blank to use each student's default rate" style="flex:1"/>
+        <span style="font-size:13px;color:var(--text3);white-space:nowrap">/hr</span>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:6px">Set a group-specific rate that overrides individual student rates for sessions in this group.</div>
+    </div>`;
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="doAddMembers(${gid})">Add selected</button>`;
+  }
+
+  if(type==='logClass'){
+    title='Log a class';
+    body=`
+    <div class="form-field"><label>Student</label><select id="m-sid" onchange="updateFeePreview()">
+      ${S.students.map(s=>`<option value="${s.id}" ${data===s.id?'selected':''}>${s.name}</option>`).join('')}
+    </select></div>
+    <div class="form-row" style="margin-bottom:14px">
+      <div class="form-field" style="margin:0"><label>Date</label><input id="m-date" type="date" value="${todayStr()}"/></div>
+      <div class="form-field" style="margin:0"><label>Hours</label><input id="m-hrs" type="number" min="0.25" step="0.25" value="1" oninput="updateFeePreview()"/></div>
+    </div>
+    <div class="form-field"><label>Class group (optional)</label><select id="m-gid" onchange="updateFeePreview()">
+      <option value="">— No group —</option>
+      ${S.groups.map(g=>`<option value="${g.id}">${g.name}</option>`).join('')}
+    </select></div>
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-bottom:14px;padding:12px 14px;background:var(--green-lt);border:1px solid #B8D9B0;border-radius:var(--r-sm)">
+      <input type="checkbox" id="m-free" onchange="updateFeePreview()" style="width:18px;height:18px;flex-shrink:0;accent-color:var(--green)"/>
+      <span style="font-size:13px;color:var(--green);font-weight:500;letter-spacing:0;text-transform:none">Mark as free session (no charge)</span>
+    </label>
+    <div class="fee-preview" id="fee-preview">Calculating…</div>`;
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="doLogClass()">Log class</button>`;
+  }
+
+  if(type==='logGroupClass'){
+    const gid=data; const g=S.groups.find(gr=>gr.id===gid);
+    const members=groupMembers(gid);
+    if(S.selectedMemberIds.length===0) S.selectedMemberIds=members.map(m=>m.id);
+    if(!S.freeSessionIds) S.freeSessionIds=[];
+    // Default rate: use the first member's group rate, or group's common rate if all match
+    const firstRate = effectiveRate(gid, members[0]?.id);
+    title=`Log class — ${g?.name}`;
+    body=`
+    <div class="form-row" style="margin-bottom:14px">
+      <div class="form-field" style="margin:0"><label>Date</label><input id="m-date" type="date" value="${todayStr()}"/></div>
+      <div class="form-field" style="margin:0"><label>Hours</label><input id="m-hrs" type="number" min="0.25" step="0.25" value="1" oninput="updateGroupFeePreview(${gid})"/></div>
+    </div>
+    <div class="form-field">
+      <label>Rate ($/hr) — applies to all students this session</label>
+      <input id="m-group-rate" type="number" min="0" step="5" value="${firstRate||''}" placeholder="e.g. 50" oninput="updateGroupFeePreview(${gid})"/>
+      <div style="font-size:11px;color:var(--text3);margin-top:5px">Each student will be charged this rate. Mark individuals as free using long-press below.</div>
+    </div>
+    <div id="group-fee-preview" style="background:var(--cream);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 14px;font-size:13px;color:var(--text2);margin-bottom:14px;text-align:center">
+      Enter hours and rate to see fee
+    </div>
+    <div class="section-title" style="margin-bottom:8px">Present students — tap to deselect, long-press to mark free</div>
+    <div class="check-list">
+      ${members.map(s=>{
+        const sel=S.selectedMemberIds.includes(s.id);
+        const isFree=S.freeSessionIds.includes(s.id);
+        return`<div class="check-item ${sel?'selected':''}" onclick="toggleMemberSel(${s.id})" oncontextmenu="event.preventDefault();toggleFreeSession(${s.id})" style="${isFree?'border-color:var(--green)!important;background:#E3EDE0!important':''}">
+          <div class="avatar ${s.color||'av-tan'}" style="width:30px;height:30px;font-size:11px">${ini(s.name)}</div>
+          <div class="check-item-name">${s.name}</div>
+          <div style="font-size:11px;color:${isFree?'var(--green)':'var(--text3)'};">${isFree?'Free — no charge':'Charged at session rate'}</div>
+          <div class="checkmark" style="${isFree?'background:var(--green);border-color:var(--green);color:#fff':''}">${sel?'✓':''}</div>
+        </div>`;}).join('')}
+    </div>`;
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="doLogGroupClass(${gid})">Log for selected</button>`;
+  }
+
+  if(type==='logPayment'){
+    title='Record payment';
+    body=`
+    <div class="form-field"><label>Student</label><select id="m-sid">
+      ${S.students.map(s=>{const f=fees(s.id);return`<option value="${s.id}" ${data===s.id?'selected':''}>${s.name} (${fmtM(f.due)} due)</option>`;}).join('')}
+    </select></div>
+    <div class="form-row" style="margin-bottom:14px">
+      <div class="form-field" style="margin:0"><label>Amount ($)</label><input id="m-amt" type="number" min="0" step="10" placeholder="0"/></div>
+      <div class="form-field" style="margin:0"><label>Date</label><input id="m-date" type="date" value="${todayStr()}"/></div>
+    </div>
+    <div class="form-field"><label>Note</label><input id="m-note" placeholder="e.g. March payment"/></div>`;
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="doPayment()">Record</button>`;
+  }
+
+  if(type==='dayDetail'){
+    const ds=data; const ss=S.sessions.filter(s=>s.date===ds);
+    title=fmtD(ds);
+    body=`${ss.length===0?`<div class="empty"><div class="empty-icon">🩰</div>No classes this day</div>`:
+    ss.map(sess=>{const st=S.students.find(s=>s.id===sess.student_id);const grp=S.groups.find(g=>g.id===sess.group_id);
+      return`<div class="sess-item" style="border:none;padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="avatar ${st?.color||'av-tan'}" style="width:36px;height:36px;font-size:12px">${ini(st?.name)}</div>
+          <div><div class="sess-date">${st?.name}</div><div class="sess-hrs">${sess.hours}hr${grp?` · ${grp.name}`:''}</div></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="sess-fee">${fmtM(sess.fee)}</span>
+          <button class="btn btn-danger btn-icon btn-sm" onclick="delSession(${sess.id});CM()">✕</button>
+        </div>
+      </div>`;}).join('')}
+    <button class="btn btn-primary btn-full" style="margin-top:14px" onclick="CM();OM('logClass',null)">+ Add class for this day</button>`;
+    footer=`<button class="btn btn-ghost btn-full" onclick="CM()">Close</button>`;
+  }
+
+  if(type==='editSession'){
+    const {id,fee,hours,rate,date,grp} = data;
+    title = 'Edit class';
+    body = `
+    <div class="form-row" style="margin-bottom:14px">
+      <div class="form-field" style="margin:0"><label>Date</label><input id="m-sess-date" type="date" value="${date}"/></div>
+      <div class="form-field" style="margin:0"><label>Hours</label><input id="m-sess-hours" type="number" min="0.25" step="0.25" value="${hours}" oninput="updateSessPreview()"/></div>
+    </div>
+    <div class="form-field">
+      <label>Rate ($/hr)</label>
+      <input id="m-sess-rate" type="number" min="0" step="5" value="${rate}" oninput="updateSessPreview()"/>
+    </div>
+    <div id="sess-fee-preview" style="background:var(--cream);border:1px solid var(--border);border-radius:var(--r-sm);padding:10px 14px;font-size:13px;color:var(--text2);text-align:center;margin-top:4px">
+      <strong style="color:var(--tan);font-family:var(--serif);font-size:17px">${fmtM(fee)}</strong> current fee
+    </div>
+    ${grp?`<div style="font-size:12px;color:var(--text3);margin-top:10px">Class: ${grp}</div>`:''}`;
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="doEditSession(${id})">Save changes</button>`;
+  }
+
+  if(type==='playVideo'){
+    title=data.title||'Video';
+    body=`<video controls autoplay style="width:100%;border-radius:var(--r-sm);background:#000"><source src="${data.url}"/>Your browser does not support video.</video>`;
+    footer=`<button class="btn btn-ghost btn-full" onclick="CM()">Close</button>`;
+  }
+
+  if(type==='addYouTube'){
+    const{studentId,groupId}=data;
+    const targetName=studentId?(S.students.find(s=>s.id===studentId)?.name||'student'):'group';
+    title='Add YouTube video';
+    body=`
+    <p style="font-size:13px;color:var(--text2);margin-bottom:16px">Paste a YouTube link — students can watch it directly in the app.</p>
+    <div class="form-field"><label>YouTube URL</label><input id="m-yt-url" type="url" placeholder="https://youtube.com/watch?v=..."/></div>
+    <div class="form-field"><label>Title</label><input id="m-yt-title" placeholder="e.g. Footwork combination Mar 15"/></div>
+    <div class="form-field"><label>Description (optional)</label><textarea id="m-yt-desc" placeholder="Notes for ${targetName}…"></textarea></div>`;
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="doAddYouTube(${studentId||'null'},${groupId||'null'})">Save link</button>`;
+  }
+
+  if(type==='uploadVideoMeta'){
+    title='Name this video';
+    body=`
+    <div class="form-field"><label>Title</label><input id="m-vtitle" placeholder="e.g. Footwork practice Mar 15" value="${data?.name||''}"/></div>
+    <div class="form-field"><label>Description (optional)</label><textarea id="m-vdesc" placeholder="Notes for the student…"></textarea></div>`;
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="confirmUpload()">Upload</button>`;
+  }
+
+  return`<div class="modal-overlay" onclick="if(event.target===this)CM()">
+    <div class="modal">
+      <div class="modal-handle"></div>
+      <div class="modal-header"><div class="modal-title">${title}</div><button class="btn btn-ghost btn-icon btn-sm" onclick="CM()">✕</button></div>
+      <div class="modal-body">${body}</div>
+      <div class="modal-footer">${footer}</div>
+    </div>
+  </div>`;
+}
+
+// ── BIND ──────────────────────────────────────────────────────
+function bind(){
+  setTimeout(()=>{
+    const sid=document.getElementById('m-sid');
+    const hrs=document.getElementById('m-hrs');
+    if(sid&&hrs){ updateFeePreview(); sid.addEventListener('change',updateFeePreview); }
+    // Trigger session edit preview on open
+    if(document.getElementById('m-sess-rate')) updateSessPreview();
+  },50);
+}
+
+function updateFeePreview(){
+  const sid=document.getElementById('m-sid');
+  const hrs=document.getElementById('m-hrs');
+  const prev=document.getElementById('fee-preview');
+  if(!sid||!hrs||!prev) return;
+  const s=S.students.find(st=>st.id===+sid.value);
+  const h=parseFloat(hrs.value)||0;
+  const isFree=document.getElementById('m-free')?.checked;
+  if(s&&h){
+    if(isFree) prev.innerHTML=`<strong style="color:var(--green)">Free</strong> &nbsp;${h}hr — no charge`;
+    else {
+      const gidEl=document.getElementById('m-gid');
+      const gid=gidEl?.value?parseInt(gidEl.value):null;
+      const rate=gid?effectiveRate(gid,s.id):s.rate;
+      prev.innerHTML=`<strong>${fmtM(h*rate)}</strong> &nbsp;${h}hr × ${fmtM(rate)}/hr`;
+    }
+  } else prev.textContent='Enter hours to see fee';
+}
+
+// ── WINDOW ACTIONS (callable from onclick) ────────────────────
+window.navigate  = hash => { window.location.hash = hash; };
+window.OM        = (t,d)=>{ S.selectedMemberIds=[]; S.freeSessionIds=[]; S.modal={type:t,data:d}; R(); };
+window.CM        = ()=>{ S.modal=null; R(); };
+window.calPrev   = ()=>{ S.calM--; if(S.calM<0){S.calM=11;S.calY--;} R(); };
+window.calNext   = ()=>{ S.calM++; if(S.calM>11){S.calM=0;S.calY++;} R(); };
+window.updateFeePreview = updateFeePreview;
+
+window.updateGroupFeePreview = (gid) => {
+  const hrs = parseFloat(document.getElementById('m-hrs')?.value)||0;
+  const rate = parseFloat(document.getElementById('m-group-rate')?.value)||0;
+  const prev = document.getElementById('group-fee-preview');
+  if (!prev) return;
+  const members = groupMembers(gid);
+  const selectedCount = S.selectedMemberIds.length>0 ? S.selectedMemberIds.length : members.length;
+  const freeCount = (S.freeSessionIds||[]).length;
+  const charged = selectedCount - freeCount;
+  if (hrs && rate) {
+    const perStudent = hrs * rate;
+    const total = perStudent * charged;
+    prev.innerHTML = `<strong style="color:var(--tan);font-family:var(--serif);font-size:17px">${fmtM(perStudent)}</strong> per student &nbsp;·&nbsp; <strong style="color:var(--text)">${fmtM(total)}</strong> total for ${charged} student${charged!==1?'s':''}${freeCount?' + '+freeCount+' free':''}`;
+  } else {
+    prev.textContent = 'Enter hours and rate to see fee';
+  }
+};
+
+window.toggleFreeSession = id => {
+  if(!S.freeSessionIds) S.freeSessionIds=[];
+  const i=S.freeSessionIds.indexOf(id);
+  if(i>=0) S.freeSessionIds.splice(i,1); else S.freeSessionIds.push(id);
+  S.modal={...S.modal}; R();
+};
+
+window.toggleMemberSel = id => {
+  const i=S.selectedMemberIds.indexOf(id);
+  if(i>=0) S.selectedMemberIds.splice(i,1); else S.selectedMemberIds.push(id);
+  document.querySelectorAll('.check-item').forEach(el=>{
+    const m=el.getAttribute('onclick')?.match(/\d+/);
+    if(!m) return;
+    const eid=parseInt(m[0]);
+    const sel=S.selectedMemberIds.includes(eid);
+    el.classList.toggle('selected',sel);
+    const ck=el.querySelector('.checkmark');
+    if(ck) ck.textContent=sel?'✓':'';
+  });
+  // Refresh fee preview if group modal is open
+  const rateEl=document.getElementById('m-group-rate');
+  if(rateEl && S.modal?.data) window.updateGroupFeePreview(S.modal.data);
+};
+
+window.doLogout = async () => { await sb.auth.signOut(); window.location.replace('./login.html'); };
+
+window.doAddStudent = async () => {
+  const name=document.getElementById('m-name')?.value.trim();
+  if(!name){ showToast('Please enter a name'); return; }
+  const rate=parseFloat(document.getElementById('m-rate')?.value)||0;
+  const color=document.getElementById('m-color')?.value||AV_COLORS[0];
+  const notes=document.getElementById('m-notes')?.value.trim()||null;
+  const{error}=await sb.from('students').insert({name,rate,color,notes});
+  if(error){ showToast('Error: '+error.message); return; }
+  showToast('Student added!'); CM(); await loadAll();
+};
+
+window.doEditStudent = async id => {
+  const name=document.getElementById('m-name')?.value.trim(); if(!name) return;
+  const rate=parseFloat(document.getElementById('m-rate')?.value)||0;
+  const color=document.getElementById('m-color')?.value;
+  const notes=document.getElementById('m-notes')?.value.trim()||null;
+  const{error}=await sb.from('students').update({name,rate,color,notes}).eq('id',id);
+  if(error){ showToast('Error: '+error.message); return; }
+  showToast('Saved!'); CM(); await loadAll();
+};
+
+window.delStudent = async id => {
+  if(!confirm('Remove this student and all their data?')) return;
+  await sb.from('students').delete().eq('id',id);
+  await loadAll();
+  navigate('#students');
+};
+
+window.doInviteStudent = async studentId => {
+  const email=document.getElementById('m-inv-email')?.value.trim();
+  const pass=document.getElementById('m-inv-pass')?.value;
+  if(!email||!pass){ showToast('Fill in email and password'); return; }
+  const{data,error}=await sb.auth.signUp({email,password:pass,options:{data:{role:'student',full_name:S.students.find(s=>s.id===studentId)?.name||''}}});
+  if(error){ showToast('Error: '+error.message); return; }
+  const newUserId=data.user?.id;
+  if(newUserId){ await sb.from('students').update({user_id:newUserId}).eq('id',studentId); }
+  showToast('Login created!'); CM(); await loadAll();
+};
+
+window.doAddGroup = async () => {
+  const name=document.getElementById('m-gname')?.value.trim(); if(!name) return;
+  const day_of_week=parseInt(document.getElementById('m-gday')?.value)||0;
+  const time_of_day=document.getElementById('m-gtime')?.value.trim();
+  const style=document.getElementById('m-gstyle')?.value.trim();
+  const color=document.getElementById('m-gcolor')?.value||GI_COLORS[0];
+  const{error}=await sb.from('groups').insert({name,day_of_week,time_of_day,style,color});
+  if(error){ showToast('Error: '+error.message); return; }
+  showToast('Group created!'); CM(); await loadAll();
+};
+
+window.doEditGroup = async id => {
+  const name=document.getElementById('m-gname')?.value.trim(); if(!name) return;
+  const day_of_week=parseInt(document.getElementById('m-gday')?.value)||0;
+  const time_of_day=document.getElementById('m-gtime')?.value.trim();
+  const style=document.getElementById('m-gstyle')?.value.trim();
+  const color=document.getElementById('m-gcolor')?.value;
+  const{error}=await sb.from('groups').update({name,day_of_week,time_of_day,style,color}).eq('id',id);
+  if(error){ showToast('Error: '+error.message); return; }
+  showToast('Saved!'); CM(); await loadAll();
+};
+
+window.delGroup = async id => {
+  if(!confirm('Delete this group? Students and sessions are kept.')) return;
+  await sb.from('groups').delete().eq('id',id);
+  await loadAll();
+  navigate('#groups');
+};
+
+window.doAddMembers = async gid => {
+  if(S.selectedMemberIds.length===0){ showToast('Select at least one student'); return; }
+  const rateOverrideVal = document.getElementById('m-rate-override')?.value;
+  const rate_override = rateOverrideVal ? parseFloat(rateOverrideVal) : null;
+  const rows=S.selectedMemberIds.map(sid=>({group_id:gid,student_id:sid,rate_override}));
+  const{error}=await sb.from('group_members').upsert(rows);
+  if(error){ showToast('Error: '+error.message); return; }
+  showToast('Students added!'); CM(); await loadAll();
+};
+
+window.removeMember = async (gid,sid) => {
+  await sb.from('group_members').delete().eq('group_id',gid).eq('student_id',sid);
+  await loadAll();
+};
+
+window.doLogClass = async () => {
+  const sid=parseInt(document.getElementById('m-sid')?.value);
+  const date=document.getElementById('m-date')?.value;
+  const hours=parseFloat(document.getElementById('m-hrs')?.value)||0;
+  const gidVal=document.getElementById('m-gid')?.value;
+  const group_id=gidVal?parseInt(gidVal):null;
+  const isFree=document.getElementById('m-free')?.checked||false;
+  if(!sid||!date||!hours){ showToast('Fill in all fields'); return; }
+  const s=S.students.find(st=>st.id===sid);
+  const rate_snapshot=isFree?0:(group_id ? effectiveRate(group_id, sid) : (s?.rate||0));
+  const{error}=await sb.from('sessions').insert({student_id:sid,date,hours,group_id,rate_snapshot});
+  if(error){ showToast('Error: '+error.message); return; }
+  showToast(isFree?'Free class logged!':'Class logged!'); CM(); await loadAll();
+};
+
+window.doLogGroupClass = async gid => {
+  const date=document.getElementById('m-date')?.value;
+  const hours=parseFloat(document.getElementById('m-hrs')?.value)||0;
+  const sessionRate=parseFloat(document.getElementById('m-group-rate')?.value)||0;
+  if(!date||!hours){ showToast('Fill in date and hours'); return; }
+  if(!sessionRate){ showToast('Please enter a rate for this session'); return; }
+  const members=groupMembers(gid);
+  const ids=S.selectedMemberIds.length>0?S.selectedMemberIds:members.map(m=>m.id);
+  const freeIds=S.freeSessionIds||[];
+  const rows=members.filter(s=>ids.includes(s.id)).map(s=>({
+    student_id:s.id, date, hours, group_id:gid,
+    rate_snapshot: freeIds.includes(s.id) ? 0 : sessionRate
+  }));
+  if(rows.length===0){ showToast('No students selected'); return; }
+  const{error}=await sb.from('sessions').insert(rows);
+  if(error){ showToast('Error: '+error.message); return; }
+  const freeCount=rows.filter(r=>r.rate_snapshot===0).length;
+  const paidCount=rows.length-freeCount;
+  showToast(`Logged! ${paidCount} charged ${fmtM(hours*sessionRate)} each${freeCount?' · '+freeCount+' free':''}`);
+  S.selectedMemberIds=[]; S.freeSessionIds=[];
+  CM(); await loadAll();
+};
+
+window.delSession = async id => { await sb.from('sessions').delete().eq('id',id); await loadAll(); };
+
+window.updateSessPreview = () => {
+  const h = parseFloat(document.getElementById('m-sess-hours')?.value)||0;
+  const r = parseFloat(document.getElementById('m-sess-rate')?.value)||0;
+  const prev = document.getElementById('sess-fee-preview');
+  if (prev && h && r) {
+    prev.innerHTML = `<strong style="color:var(--tan);font-family:var(--serif);font-size:17px">${fmtM(h*r)}</strong> &nbsp;${h}hr × ${fmtM(r)}/hr`;
+  }
+};
+
+window.doEditSession = async id => {
+  const date  = document.getElementById('m-sess-date')?.value;
+  const hours = parseFloat(document.getElementById('m-sess-hours')?.value)||0;
+  const rate  = parseFloat(document.getElementById('m-sess-rate')?.value)||0;
+  if (!date||!hours) { showToast('Fill in all fields'); return; }
+  const { error } = await sb.from('sessions')
+    .update({ date, hours, rate_snapshot: rate })
+    .eq('id', id);
+  if (error) { showToast('Error: '+error.message); return; }
+  showToast('Session updated!'); CM(); await loadAll();
+};
+
+window.doPayment = async () => {
+  const sid=parseInt(document.getElementById('m-sid')?.value);
+  const amount=parseFloat(document.getElementById('m-amt')?.value)||0;
+  const date=document.getElementById('m-date')?.value;
+  const note=document.getElementById('m-note')?.value.trim();
+  if(!sid||!amount||!date){ showToast('Fill in all fields'); return; }
+  const{error}=await sb.from('payments').insert({student_id:sid,amount,date,note});
+  if(error){ showToast('Error: '+error.message); return; }
+  showToast('Payment recorded!'); CM(); await loadAll();
+};
+
+window.delPayment = async id => { await sb.from('payments').delete().eq('id',id); await loadAll(); };
+
+let _pendingUpload=null;
+window.uploadVideo = async (input,studentId,groupId) => {
+  const file=input.files[0]; if(!file) return;
+  _pendingUpload={file,studentId,groupId};
+  OM('uploadVideoMeta',{name:file.name.replace(/\.[^/.]+$/,'')});
+};
+
+window.confirmUpload = async () => {
+  if(!_pendingUpload) return;
+  const{file,studentId,groupId}=_pendingUpload;
+  const title=document.getElementById('m-vtitle')?.value.trim()||file.name;
+  const description=document.getElementById('m-vdesc')?.value.trim();
+  CM(); S.loading=true; R();
+  const ext=file.name.split('.').pop();
+  const path=`${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+  const{error:upErr}=await sb.storage.from('videos').upload(path,file);
+  if(upErr){ showToast('Upload failed: '+upErr.message); S.loading=false; R(); return; }
+  const{error:dbErr}=await sb.from('videos').insert({title,description,file_path:path,student_id:studentId||null,group_id:groupId||null,uploaded_by:S.session?.user?.id});
+  if(dbErr) showToast('Error saving video: '+dbErr.message);
+  else showToast('Video uploaded!');
+  _pendingUpload=null; await loadAll();
+};
+
+window.playVideo = async (filePath,title) => {
+  const{data}=await sb.storage.from('videos').createSignedUrl(filePath,3600);
+  if(data?.signedUrl) OM('playVideo',{url:data.signedUrl,title});
+  else showToast('Could not load video');
+};
+
+window.delVideo = async (id,filePath) => {
+  if(!confirm('Delete this video?')) return;
+  if(filePath&&filePath!=='youtube'&&filePath!=='null'&&filePath!==null){
+    await sb.storage.from('videos').remove([filePath]);
+  }
+  await sb.from('videos').delete().eq('id',id);
+  showToast('Deleted'); await loadAll();
+};
+
+window.openYouTube = url => window.open(url,'_blank');
+
+window.doAddYouTube = async (studentId,groupId) => {
+  const url=document.getElementById('m-yt-url')?.value.trim();
+  const title=document.getElementById('m-yt-title')?.value.trim();
+  const description=document.getElementById('m-yt-desc')?.value.trim();
+  if(!url){ showToast('Please enter a YouTube URL'); return; }
+  if(!url.includes('youtube.com')&&!url.includes('youtu.be')){ showToast('Please enter a valid YouTube URL'); return; }
+  const{error}=await sb.from('videos').insert({title:title||'YouTube video',description:description||null,file_path:'youtube',youtube_url:url,student_id:studentId||null,group_id:groupId||null,uploaded_by:S.session?.user?.id});
+  if(error){ showToast('Error: '+error.message); return; }
+  showToast('YouTube link saved!'); CM(); await loadAll();
+};
+
+// ── BOOT ──────────────────────────────────────────────────────
+init();
+</script>
+
+<script>
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+}
+</script>
+</body>
+</html>
