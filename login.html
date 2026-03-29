@@ -15,7 +15,9 @@
 <div class="app">
   <div class="login-wrap">
     <div class="login-logo">Natya<span>Space</span></div>
-    <div class="login-card">
+
+    <!-- ── SIGN IN PANEL ── -->
+    <div id="panel-login" class="login-card">
       <div id="login-err" class="login-err" style="display:none"></div>
       <div class="form-field">
         <label>Email</label>
@@ -26,7 +28,32 @@
         <input id="li-pass" type="password" placeholder="••••••••" autocomplete="current-password"/>
       </div>
       <button class="btn btn-primary btn-full" id="signin-btn" style="margin-top:4px">Sign in</button>
+      <div style="text-align:center;margin-top:16px">
+        <button id="show-forgot" style="background:none;border:none;cursor:pointer;font-size:13px;color:var(--text3);font-family:var(--font)">
+          Forgot password?
+        </button>
+      </div>
     </div>
+
+    <!-- ── FORGOT PASSWORD PANEL ── -->
+    <div id="panel-forgot" class="login-card" style="display:none">
+      <p style="font-size:13px;color:var(--text2);margin-bottom:16px;line-height:1.5">
+        Enter your email and we'll send you a link to reset your password.
+      </p>
+      <div id="forgot-err" class="login-err" style="display:none"></div>
+      <div id="forgot-success" style="display:none;background:var(--green-lt);color:var(--green);border-radius:var(--r-sm);padding:10px 14px;font-size:13px;margin-bottom:14px"></div>
+      <div class="form-field">
+        <label>Email</label>
+        <input id="forgot-email" type="email" placeholder="you@email.com" autocomplete="email"/>
+      </div>
+      <button class="btn btn-primary btn-full" id="forgot-btn">Send reset link</button>
+      <div style="text-align:center;margin-top:16px">
+        <button id="show-login" style="background:none;border:none;cursor:pointer;font-size:13px;color:var(--text3);font-family:var(--font)">
+          ← Back to sign in
+        </button>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -40,6 +67,20 @@ if (session) {
   window.location.replace(prof?.role === 'student' ? './student.html' : './app.html');
 }
 
+// ── PANEL TOGGLE ──────────────────────────────────────────────
+document.getElementById('show-forgot').addEventListener('click', () => {
+  document.getElementById('panel-login').style.display = 'none';
+  document.getElementById('panel-forgot').style.display = '';
+  document.getElementById('forgot-email').focus();
+});
+
+document.getElementById('show-login').addEventListener('click', () => {
+  document.getElementById('panel-forgot').style.display = 'none';
+  document.getElementById('panel-login').style.display = '';
+  document.getElementById('li-email').focus();
+});
+
+// ── SIGN IN ───────────────────────────────────────────────────
 async function doLogin() {
   const email = document.getElementById('li-email').value.trim();
   const pass  = document.getElementById('li-pass').value;
@@ -60,7 +101,6 @@ async function doLogin() {
     return;
   }
 
-  // Auth state change will fire — fetch role and redirect
   const { data: { session: sess } } = await sb.auth.getSession();
   const { data: prof } = await sb.from('profiles').select('role').eq('id', sess.user.id).single();
   window.location.replace(prof?.role === 'student' ? './student.html' : './app.html');
@@ -69,6 +109,42 @@ async function doLogin() {
 document.getElementById('signin-btn').addEventListener('click', doLogin);
 document.getElementById('li-pass').addEventListener('keydown', e => {
   if (e.key === 'Enter') doLogin();
+});
+
+// ── FORGOT PASSWORD ───────────────────────────────────────────
+async function doForgot() {
+  const email  = document.getElementById('forgot-email').value.trim();
+  const errEl  = document.getElementById('forgot-err');
+  const succEl = document.getElementById('forgot-success');
+  const btn    = document.getElementById('forgot-btn');
+
+  errEl.style.display = 'none';
+  succEl.style.display = 'none';
+
+  if (!email) {
+    errEl.style.display = ''; errEl.textContent = 'Please enter your email address.'; return;
+  }
+
+  btn.textContent = 'Sending…'; btn.disabled = true;
+
+  const { error } = await sb.auth.resetPasswordForEmail(email, {
+    redirectTo: `${window.location.origin}/reset-password.html`
+  });
+
+  if (error) {
+    errEl.style.display = ''; errEl.textContent = error.message;
+    btn.textContent = 'Send reset link'; btn.disabled = false;
+    return;
+  }
+
+  succEl.style.display = '';
+  succEl.textContent = 'Check your inbox — a reset link is on its way.';
+  btn.textContent = 'Send reset link'; btn.disabled = false;
+}
+
+document.getElementById('forgot-btn').addEventListener('click', doForgot);
+document.getElementById('forgot-email').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doForgot();
 });
 </script>
 </body>
