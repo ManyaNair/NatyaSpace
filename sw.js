@@ -1,10 +1,13 @@
-const CACHE = 'natyaspace-v1';
+const CACHE = 'natyaspace-v2';
 const ASSETS = [
   './',
   './index.html',
   './login.html',
   './app.html',
   './student.html',
+  './parent.html',
+  './set-password.html',
+  './reset-password.html',
   './styles.css',
   './supabase.js',
   './state.js',

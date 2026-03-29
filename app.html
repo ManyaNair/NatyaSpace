@@ -40,16 +40,18 @@ async function init() {
 
 async function loadAll() {
   S.loading = true; R();
-  const [st,se,pa,gr,gm,vi] = await Promise.all([
+  const [st,se,pa,gr,gm,vi,ps] = await Promise.all([
     sb.from('students').select('*').order('name'),
     sb.from('sessions').select('*').order('date',{ascending:false}),
     sb.from('payments').select('*').order('date',{ascending:false}),
     sb.from('groups').select('*').order('name'),
     sb.from('group_members').select('*'),
     sb.from('videos').select('*').order('created_at',{ascending:false}),
+    sb.from('parent_student').select('*'),
   ]);
   S.students=st.data||[]; S.sessions=se.data||[]; S.payments=pa.data||[];
   S.groups=gr.data||[]; S.groupMembers=gm.data||[]; S.videos=vi.data||[];
+  S.parentLinks=ps.data||[];
   S.loading=false; R();
 }
 
@@ -79,7 +81,7 @@ function buildApp() {
   if (S.loading) return `<div class="app"><div class="main" style="display:flex;align-items:center;justify-content:center;height:100vh"><div class="loading"><div class="spinner"></div>Loading NatyaSpace…</div></div></div>`;
 
   const { page, id } = getRoute();
-  const tabs = [['overview','◎','Overview'],['students','◉','Students'],['groups','◫','Groups'],['calendar','▦','Calendar'],['payments','◈','Payments'],['practice','♪','Practice']];
+  const tabs = [['overview','◎','Overview'],['students','◉','Students'],['groups','◫','Groups'],['calendar','▦','Calendar'],['payments','◈','Payments'],['practice','♪','Practice'],['parents','◍','Parents']];
 
   return `<div class="app">
     <div class="header">
@@ -115,6 +117,7 @@ function buildContent(page, id) {
   if (page==='calendar')  return buildCalendar();
   if (page==='payments')  return buildPayments();
   if (page==='practice')  return buildPractice();
+  if (page==='parents')   return buildParents();
   return buildOverview();
 }
 
@@ -403,6 +406,46 @@ function buildPractice(){
   }).join('')}</div>`}`;
 }
 
+// ── PARENTS ───────────────────────────────────────────────────
+function buildParents(){
+  // Group parent_student links by parent_id
+  const parentMap = {};
+  (S.parentLinks||[]).forEach(link => {
+    if(!parentMap[link.parent_id]) parentMap[link.parent_id] = [];
+    parentMap[link.parent_id].push(link.student_id);
+  });
+  const parentIds = Object.keys(parentMap);
+
+  return`
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;margin-bottom:10px">
+    <div class="section-title" style="margin:0">Parents (${parentIds.length})</div>
+    <button class="btn btn-primary btn-sm" onclick="OM('inviteParent',null)">+ Invite parent</button>
+  </div>
+  ${parentIds.length===0
+    ? `<div class="card"><div class="empty"><div class="empty-icon">👨‍👩‍👧</div>No parent accounts yet.<br/>Use "+ Invite parent" to add one.</div></div>`
+    : `<div class="card">
+        ${parentIds.map(pid => {
+          const linkedStudents = (parentMap[pid]||[]).map(sid => S.students.find(s=>s.id===sid)).filter(Boolean);
+          return`<div class="student-row">
+            <div class="avatar av-slate" style="font-size:16px">👤</div>
+            <div class="s-info">
+              <div class="s-name" style="font-size:13px;font-family:var(--font)">${pid.slice(0,8)}…</div>
+              <div class="s-meta" style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">
+                ${linkedStudents.length===0
+                  ? `<span style="color:var(--text3)">No students linked</span>`
+                  : linkedStudents.map(s=>`<span class="badge badge-tan">${s.name}</span>`).join('')}
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+              <button class="btn btn-ghost btn-sm" onclick="OM('manageParent','${pid}')">Manage</button>
+              <button class="btn btn-danger btn-sm" onclick="deleteParent('${pid}')">Remove</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`
+  }`;
+}
+
 // ── VIDEO CARD ────────────────────────────────────────────────
 function getYouTubeId(url){
   if(!url) return null;
@@ -681,6 +724,31 @@ function buildModal(){
     <button class="btn btn-primary" onclick="doInviteParent()">Send invite</button>`;
   }
 
+  if(type==='manageParent'){
+    const pid=data;
+    const linkedIds=(S.parentLinks||[]).filter(l=>l.parent_id===pid).map(l=>l.student_id);
+    const linkedStudents=linkedIds.map(sid=>S.students.find(s=>s.id===sid)).filter(Boolean);
+    // pre-populate selectedMemberIds with current links so checklist shows current state
+    if(S.selectedMemberIds.length===0) S.selectedMemberIds=[...linkedIds];
+    const checks=S.students.map(s=>{
+      const sel=S.selectedMemberIds.includes(s.id);
+      return`<div class="check-item ${sel?'selected':''}" onclick="toggleMemberSel(${s.id})">
+        <div class="avatar ${s.color||'av-tan'}" style="width:32px;height:32px;font-size:11px">${ini(s.name)}</div>
+        <div class="check-item-name">${s.name}</div>
+        <div class="checkmark">${sel?'✓':''}</div>
+      </div>`;
+    }).join('');
+    title='Manage Parent';
+    body=`
+    <p style="font-size:13px;color:var(--text2);margin-bottom:16px;line-height:1.6">Update which students this parent can see. Changes take effect immediately.</p>
+    <div class="form-field" style="margin-bottom:6px">
+      <label>Linked students</label>
+      <div class="check-list" style="max-height:240px">${checks}</div>
+    </div>`;
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="doUpdateParentLinks('${pid}')">Save changes</button>`;
+  }
+
   return`<div class="modal-overlay" onclick="if(event.target===this)CM()">
     <div class="modal">
       <div class="modal-handle"></div>
@@ -863,6 +931,26 @@ window.removeStudentLogin = async sid => {
   await sb.from('students').update({user_id:null}).eq('id',sid);
   showToast('Login removed');
   await loadAll();
+};
+
+window.deleteParent = async pid => {
+  if(!confirm('Remove this parent account? They will lose access immediately.')) return;
+  await sb.from('parent_student').delete().eq('parent_id', pid);
+  await sb.from('profiles').delete().eq('id', pid);
+  await sb.rpc('delete_user_account', {user_id: pid}).catch(()=>{});
+  showToast('Parent removed');
+  await loadAll();
+};
+
+window.doUpdateParentLinks = async pid => {
+  await sb.from('parent_student').delete().eq('parent_id', pid);
+  if(S.selectedMemberIds.length > 0){
+    const links = S.selectedMemberIds.map(sid => ({ parent_id: pid, student_id: sid }));
+    const{error} = await sb.from('parent_student').insert(links);
+    if(error){ showToast('Error: '+error.message); return; }
+  }
+  showToast('Parent links updated!');
+  CM(); await loadAll();
 };
 
 window.doAddGroup = async () => {
