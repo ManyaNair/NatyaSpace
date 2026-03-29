@@ -214,7 +214,10 @@ function buildStudentDetail(sid){
     <button class="btn btn-primary btn-sm" onclick="OM('logClass',${sid})">+ Log class</button>
     <button class="btn btn-sage btn-sm" onclick="OM('logPayment',${sid})">+ Payment</button>
     <button class="btn btn-ghost btn-sm" onclick="OM('editStudent',${sid})">Edit</button>
-    <button class="btn btn-ghost btn-sm" onclick="OM('inviteStudent',${sid})">Invite login</button>
+    ${s.user_id
+      ? `<button class="btn btn-danger btn-sm" onclick="removeStudentLogin(${sid})">Remove login</button>`
+      : `<button class="btn btn-ghost btn-sm" onclick="OM('inviteStudent',${sid})">Invite login</button>`
+    }
   </div>
   <div class="section-title" style="padding:14px 0 0">Classes</div>
   <div class="card" style="margin-bottom:12px">
@@ -792,8 +795,17 @@ window.doEditStudent = async id => {
 };
 
 window.delStudent = async id => {
-  if(!confirm('Remove this student and all their data?')) return;
+  const s=S.students.find(st=>st.id===id);
+  const hasLogin=!!s?.user_id;
+  const msg=hasLogin
+    ? `Remove ${s?.name} and delete their login account? This cannot be undone.`
+    : `Remove ${s?.name} and all their data? This cannot be undone.`;
+  if(!confirm(msg)) return;
+  if(s?.user_id){
+    await sb.rpc('delete_user_account',{user_id:s.user_id}).catch(()=>{});
+  }
   await sb.from('students').delete().eq('id',id);
+  showToast(`${s?.name} removed`);
   await loadAll();
   navigate('#students');
 };
@@ -814,27 +826,43 @@ window.doInviteParent = async () => {
   if(!email){ showToast('Enter an email address'); return; }
   if(!S.selectedMemberIds||S.selectedMemberIds.length===0){ showToast('Select at least one student to link'); return; }
 
-  // Create the parent account via signUp (sends confirmation email)
+  // 1. Create the auth account
   const{data,error}=await sb.auth.signUp({
     email,
     password: Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)+'A1!',
-    options:{
-      data:{ role:'parent' },
-      emailRedirectTo:`${window.location.origin}/set-password.html`
-    }
+    options:{ emailRedirectTo:`${window.location.origin}/set-password.html` }
   });
   if(error){ showToast('Error: '+error.message); return; }
 
   const parentUserId=data.user?.id;
   if(!parentUserId){ showToast('Could not create account'); return; }
 
-  // Insert parent_student links
+  // 2. Manually upsert the profile row (bypasses trigger issues)
+  const{error:profErr}=await sb.from('profiles').upsert({
+    id: parentUserId,
+    role: 'parent',
+    full_name: email
+  });
+  if(profErr){ showToast('Profile error: '+profErr.message); return; }
+
+  // 3. Insert parent_student links
   const links=S.selectedMemberIds.map(sid=>({ parent_id:parentUserId, student_id:sid }));
   const{error:linkErr}=await sb.from('parent_student').insert(links);
-  if(linkErr){ showToast('Account created but linking failed: '+linkErr.message); return; }
+  if(linkErr){ showToast('Linking failed: '+linkErr.message); return; }
 
   showToast(`Invite sent to ${email}!`);
   CM(); await loadAll();
+};
+
+window.removeStudentLogin = async sid => {
+  const s=S.students.find(st=>st.id===sid);
+  if(!confirm(`Remove ${s?.name}'s login? They won't be able to sign in but their records stay.`)) return;
+  if(s?.user_id){
+    await sb.rpc('delete_user_account',{user_id:s.user_id}).catch(()=>{});
+  }
+  await sb.from('students').update({user_id:null}).eq('id',sid);
+  showToast('Login removed');
+  await loadAll();
 };
 
 window.doAddGroup = async () => {
