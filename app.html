@@ -40,7 +40,7 @@ async function init() {
 
 async function loadAll() {
   S.loading = true; R();
-  const [st,se,pa,gr,gm,vi,ps] = await Promise.all([
+  const [st,se,pa,gr,gm,vi,ps,pf] = await Promise.all([
     sb.from('students').select('*').order('name'),
     sb.from('sessions').select('*').order('date',{ascending:false}),
     sb.from('payments').select('*').order('date',{ascending:false}),
@@ -48,10 +48,11 @@ async function loadAll() {
     sb.from('group_members').select('*'),
     sb.from('videos').select('*').order('created_at',{ascending:false}),
     sb.from('parent_student').select('*'),
+    sb.from('profiles').select('id,full_name,role').eq('role','parent'),
   ]);
   S.students=st.data||[]; S.sessions=se.data||[]; S.payments=pa.data||[];
   S.groups=gr.data||[]; S.groupMembers=gm.data||[]; S.videos=vi.data||[];
-  S.parentLinks=ps.data||[];
+  S.parentLinks=ps.data||[]; S.parentProfiles=pf.data||[];
   S.loading=false; R();
 }
 
@@ -408,28 +409,33 @@ function buildPractice(){
 
 // ── PARENTS ───────────────────────────────────────────────────
 function buildParents(){
-  // Group parent_student links by parent_id
-  const parentMap = {};
-  (S.parentLinks||[]).forEach(link => {
-    if(!parentMap[link.parent_id]) parentMap[link.parent_id] = [];
-    parentMap[link.parent_id].push(link.student_id);
-  });
-  const parentIds = Object.keys(parentMap);
+  // Merge parentProfiles with parentLinks
+  const profiles = S.parentProfiles || [];
+  // Also include any parent_ids from links that may not have a profile loaded
+  const allParentIds = [...new Set([
+    ...profiles.map(p => p.id),
+    ...(S.parentLinks||[]).map(l => l.parent_id)
+  ])];
 
   return`
   <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;margin-bottom:10px">
-    <div class="section-title" style="margin:0">Parents (${parentIds.length})</div>
+    <div class="section-title" style="margin:0">Parents (${allParentIds.length})</div>
     <button class="btn btn-primary btn-sm" onclick="OM('inviteParent',null)">+ Invite parent</button>
   </div>
-  ${parentIds.length===0
+  ${allParentIds.length===0
     ? `<div class="card"><div class="empty"><div class="empty-icon">👨‍👩‍👧</div>No parent accounts yet.<br/>Use "+ Invite parent" to add one.</div></div>`
     : `<div class="card">
-        ${parentIds.map(pid => {
-          const linkedStudents = (parentMap[pid]||[]).map(sid => S.students.find(s=>s.id===sid)).filter(Boolean);
+        ${allParentIds.map(pid => {
+          const profile = profiles.find(p => p.id === pid);
+          const displayName = profile?.full_name || pid.slice(0,8)+'…';
+          const linkedStudents = (S.parentLinks||[])
+            .filter(l => l.parent_id === pid)
+            .map(l => S.students.find(s => s.id === l.student_id))
+            .filter(Boolean);
           return`<div class="student-row">
             <div class="avatar av-slate" style="font-size:16px">👤</div>
             <div class="s-info">
-              <div class="s-name" style="font-size:13px;font-family:var(--font)">${pid.slice(0,8)}…</div>
+              <div class="s-name">${displayName}</div>
               <div class="s-meta" style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">
                 ${linkedStudents.length===0
                   ? `<span style="color:var(--text3)">No students linked</span>`
