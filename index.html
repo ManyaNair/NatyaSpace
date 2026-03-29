@@ -54,6 +54,8 @@ async function route() {
 
   if (prof?.role === 'student') {
     window.location.replace('./student.html');
+  } else if (prof?.role === 'parent') {
+    window.location.replace('./parent.html');
   } else {
     window.location.replace('./app.html');
   }

@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+<meta name="apple-mobile-web-app-title" content="NatyaSpace"/>
+<meta name="theme-color" content="#F5EDE0"/>
+<title>NatyaSpace — Parent Portal</title>
+<link rel="manifest" href="manifest.json"/>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<div id="root"></div>
+<div class="toast" id="toast"></div>
+
+<script type="module">
+import { sb, MONTHS, DAY_NAMES } from './supabase.js';
+import { ini, fmtD, fmtM } from './state.js';
+
+// ── STATE ─────────────────────────────────────────────────────
+const P = {
+  session: null,
+  students: [],       // children linked to this parent
+  sessions: {},       // { student_id: [...] }
+  payments: {},       // { student_id: [...] }
+  videos: {},         // { student_id: [...] }
+  groups: [],         // all groups (for name lookup)
+  activeId: null,     // currently selected child
+  tab: 'classes',     // classes | fees | videos
+  loading: true
+};
+
+function showToast(msg, dur=2500){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), dur);
+}
+
+// ── AUTH + LOAD ───────────────────────────────────────────────
+async function init() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) { window.location.replace('./login.html'); return; }
+  P.session = session;
+
+  const { data: prof } = await sb.from('profiles').select('role').eq('id', session.user.id).single();
+  if (!prof || prof.role !== 'parent') {
+    // Wrong role — redirect appropriately
+    if (prof?.role === 'student') window.location.replace('./student.html');
+    else window.location.replace('./app.html');
+    return;
+  }
+
+  await loadAll();
+}
+
+async function loadAll() {
+  P.loading = true; R();
+
+  // 1. Get linked student IDs for this parent
+  const { data: links } = await sb.from('parent_student')
+    .select('student_id')
+    .eq('parent_id', P.session.user.id);
+
+  if (!links || links.length === 0) {
+    P.loading = false; R(); return;
+  }
+
+  const studentIds = links.map(l => l.student_id);
+
+  // 2. Load all data in parallel
+  const [stRes, seRes, paRes, viRes, grRes] = await Promise.all([
+    sb.from('students').select('*').in('id', studentIds).order('name'),
+    sb.from('sessions').select('*').in('student_id', studentIds).order('date', {ascending: false}),
+    sb.from('payments').select('*').in('student_id', studentIds).order('date', {ascending: false}),
+    sb.from('videos').select('*').in('student_id', studentIds).order('created_at', {ascending: false}),
+    sb.from('groups').select('*'),
+  ]);
+
+  P.students = stRes.data || [];
+  P.groups   = grRes.data || [];
+
+  // Index by student_id
+  P.sessions = {}; P.payments = {}; P.videos = {};
+  (seRes.data||[]).forEach(s => (P.sessions[s.student_id] = P.sessions[s.student_id]||[]).push(s));
+  (paRes.data||[]).forEach(p => (P.payments[p.student_id] = P.payments[p.student_id]||[]).push(p));
+  (viRes.data||[]).forEach(v => (P.videos[v.student_id] = P.videos[v.student_id]||[]).push(v));
+
+  // Default to first child
+  if (!P.activeId && P.students.length > 0) P.activeId = P.students[0].id;
+
+  P.loading = false; R();
+}
+
+// ── FEE HELPERS ───────────────────────────────────────────────
+function fees(sid) {
+  const sess = P.sessions[sid] || [];
+  const earned = sess.reduce((a, s) => a + (+(s.fee ?? (s.hours * s.rate_snapshot)) || 0), 0);
+  const paid   = (P.payments[sid]||[]).reduce((a, p) => a + (+p.amount||0), 0);
+  return { earned, paid, due: earned - paid, count: sess.length };
+}
+
+// ── RENDER ────────────────────────────────────────────────────
+function R() {
+  document.getElementById('root').innerHTML = build();
+  bind();
+}
+
+function build() {
+  if (P.loading) return `
+    <div class="app">
+      <div class="main" style="display:flex;align-items:center;justify-content:center;height:100vh">
+        <div class="loading"><div class="spinner"></div>Loading…</div>
+      </div>
+    </div>`;
+
+  if (P.students.length === 0) return `
+    <div class="app">
+      <div class="header"><div class="header-inner">
+        <div class="logo">Natya<span>Space</span></div>
+        <button class="btn btn-ghost btn-sm" onclick="doLogout()">Sign out</button>
+      </div></div>
+      <div class="main" style="padding:40px 24px;text-align:center">
+        <div class="empty-icon" style="font-size:40px;margin-bottom:12px">🩰</div>
+        <div style="font-family:var(--serif);font-size:20px;margin-bottom:8px">No students linked yet</div>
+        <div style="font-size:13px;color:var(--text3)">Your teacher will link your children's accounts shortly.</div>
+      </div>
+    </div>`;
+
+  const active = P.students.find(s => s.id === P.activeId) || P.students[0];
+  const f = fees(active.id);
+
+  // Child switcher tabs (shown only if more than one child)
+  const childTabs = P.students.length > 1 ? `
+    <div style="display:flex;gap:8px;padding:12px 16px;background:var(--bg2);border-bottom:1px solid var(--border);overflow-x:auto;-webkit-overflow-scrolling:touch">
+      ${P.students.map(s => `
+        <button onclick="setChild(${s.id})" style="
+          flex-shrink:0;display:flex;align-items:center;gap:8px;
+          padding:8px 14px;border-radius:20px;border:1.5px solid ${s.id===P.activeId?'var(--tan)':'var(--border)'};
+          background:${s.id===P.activeId?'var(--cream)':'var(--card)'};
+          color:${s.id===P.activeId?'var(--tan)':'var(--text2)'};
+          font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;
+        ">
+          <div class="avatar ${s.color||'av-tan'}" style="width:24px;height:24px;font-size:9px">${ini(s.name)}</div>
+          ${s.name.split(' ')[0]}
+        </button>`).join('')}
+    </div>` : '';
+
+  // Content tabs
+  const tabs = [['classes','Classes'],['fees','Fees'],['videos','Videos & Notes']];
+  const tabBar = `
+    <div style="display:flex;border-bottom:1px solid var(--border);background:var(--card)">
+      ${tabs.map(([t,lb]) => `
+        <button onclick="setTab('${t}')" style="
+          flex:1;padding:12px 0;border:none;background:none;
+          font-family:var(--font);font-size:13px;font-weight:500;
+          color:${P.tab===t?'var(--tan)':'var(--text3)'};
+          border-bottom:2px solid ${P.tab===t?'var(--tan)':'transparent'};
+          cursor:pointer;transition:all .15s;
+        ">${lb}</button>`).join('')}
+    </div>`;
+
+  const content =
+    P.tab === 'classes' ? buildClasses(active) :
+    P.tab === 'fees'    ? buildFees(active, f) :
+                          buildVideos(active);
+
+  return `
+    <div class="app">
+      <div class="header">
+        <div class="header-inner">
+          <div class="logo">Natya<span>Space</span></div>
+          <button class="btn btn-ghost btn-sm" onclick="doLogout()" style="color:var(--text3)">Sign out</button>
+        </div>
+      </div>
+      <div class="app-body" style="flex-direction:column">
+        ${childTabs}
+
+        <!-- Hero for active child -->
+        <div class="detail-hero">
+          <div class="detail-av ${active.color||'av-tan'}">${ini(active.name)}</div>
+          <div>
+            <div class="detail-name">${active.name}</div>
+            <div class="detail-sub">${active.notes||'Student'} · ${f.count} class${f.count!==1?'es':''}</div>
+          </div>
+        </div>
+
+        <!-- Fee summary bar -->
+        <div class="balance-bar">
+          <div class="bal-cell"><div class="bal-val v-tan">${fmtM(f.earned)}</div><div class="bal-lbl">Charged</div></div>
+          <div class="bal-cell"><div class="bal-val v-green">${fmtM(f.paid)}</div><div class="bal-lbl">Paid</div></div>
+          <div class="bal-cell"><div class="bal-val" style="color:${f.due>0.01?'var(--red)':'var(--green)'}">${fmtM(f.due)}</div><div class="bal-lbl">Due</div></div>
+        </div>
+
+        ${tabBar}
+        <div class="main" style="padding:16px">${content}</div>
+      </div>
+    </div>`;
+}
+
+// ── CLASSES TAB ───────────────────────────────────────────────
+function buildClasses(s) {
+  const sess = P.sessions[s.id] || [];
+  if (sess.length === 0) return `<div class="empty"><div class="empty-icon">🩰</div>No classes logged yet</div>`;
+
+  return `<div class="card">
+    ${sess.map(se => {
+      const grp = P.groups.find(g => g.id === se.group_id);
+      const fee = se.fee ?? (se.hours * se.rate_snapshot);
+      return `<div class="sess-item">
+        <div>
+          <div class="sess-date">${fmtD(se.date)}</div>
+          <div class="sess-hrs">${se.hours}hr${grp ? ` · ${grp.name}` : ''}</div>
+        </div>
+        <div class="sess-fee">${fee > 0 ? fmtM(fee) : '<span style="color:var(--green);font-size:13px">Free</span>'}</div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+// ── FEES TAB ──────────────────────────────────────────────────
+function buildFees(s, f) {
+  const pays = P.payments[s.id] || [];
+  return `
+    <div class="section-title">Payment history</div>
+    <div class="card" style="margin-bottom:16px">
+      ${pays.length === 0
+        ? `<div class="empty"><div class="empty-icon">💸</div>No payments recorded</div>`
+        : pays.map(p => `
+          <div class="pay-item">
+            <div>
+              <div style="font-weight:500">${fmtM(p.amount)}</div>
+              <div style="font-size:12px;color:var(--text3)">${p.note || fmtD(p.date)}</div>
+            </div>
+            <span style="font-size:12px;color:var(--text3)">${fmtD(p.date)}</span>
+          </div>`).join('')}
+    </div>
+    ${f.due > 0.01 ? `
+      <div style="background:var(--red-lt);border:1px solid #E8C5BF;border-radius:var(--r);padding:16px;text-align:center">
+        <div style="font-family:var(--serif);font-size:26px;color:var(--red);margin-bottom:4px">${fmtM(f.due)}</div>
+        <div style="font-size:12px;color:var(--red);font-weight:500">Outstanding balance</div>
+      </div>` : `
+      <div style="background:var(--green-lt);border:1px solid #C5E0BF;border-radius:var(--r);padding:16px;text-align:center">
+        <div style="font-size:22px;margin-bottom:4px">✓</div>
+        <div style="font-size:13px;color:var(--green);font-weight:500">All paid up!</div>
+      </div>`}`;
+}
+
+// ── VIDEOS TAB ────────────────────────────────────────────────
+function getYouTubeId(url) {
+  if (!url) return null;
+  const m = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+function buildVideos(s) {
+  const vids = P.videos[s.id] || [];
+  if (vids.length === 0) return `<div class="empty"><div class="empty-icon">🎬</div>No videos or notes yet</div>`;
+
+  return `<div class="video-grid">
+    ${vids.map(v => {
+      const ytId = getYouTubeId(v.youtube_url || '');
+      const thumbHTML = ytId
+        ? `<img src="https://img.youtube.com/vi/${ytId}/mqdefault.jpg" style="width:100%;height:100%;object-fit:cover" loading="lazy"/>
+           <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">
+             <div style="width:44px;height:44px;background:rgba(0,0,0,.6);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff">▶</div>
+           </div>`
+        : `<span style="font-size:40px">▶</span>`;
+      const clickFn = ytId ? `openYouTube('${v.youtube_url}')` : `playVideo('${v.file_path}','${(v.title||'').replace(/'/g,"\\'")}')`;
+      const badge = ytId
+        ? `<span class="badge badge-blue" style="font-size:10px">YouTube</span>`
+        : `<span class="badge badge-sage" style="font-size:10px">Video</span>`;
+      return `<div class="video-card">
+        <div class="video-thumb" onclick="${clickFn}" style="position:relative;cursor:pointer">${thumbHTML}</div>
+        <div class="video-info">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">${badge}
+            <div class="video-title">${v.title || 'Untitled'}</div>
+          </div>
+          <div class="video-meta">${v.created_at ? fmtD(v.created_at.slice(0,10)) : ''}</div>
+          ${v.description ? `<div style="font-size:12px;color:var(--text2);margin-top:4px">${v.description}</div>` : ''}
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+// ── BIND ──────────────────────────────────────────────────────
+function bind() {}
+
+// ── WINDOW ACTIONS ────────────────────────────────────────────
+window.setChild = id => { P.activeId = id; P.tab = 'classes'; R(); };
+window.setTab   = t  => { P.tab = t; R(); };
+window.doLogout = async () => { await sb.auth.signOut(); window.location.replace('./login.html'); };
+
+window.openYouTube = url => window.open(url, '_blank');
+
+window.playVideo = async (filePath, title) => {
+  const { data } = await sb.storage.from('videos').createSignedUrl(filePath, 3600);
+  if (data?.signedUrl) {
+    // Simple inline video modal
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px';
+    overlay.innerHTML = `
+      <div style="width:100%;max-width:700px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div style="color:#fff;font-weight:500;font-size:15px">${title}</div>
+          <button onclick="this.closest('div[style]').remove()" style="background:rgba(255,255,255,.2);border:none;color:#fff;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:18px">✕</button>
+        </div>
+        <video src="${data.signedUrl}" controls autoplay style="width:100%;border-radius:12px;max-height:70vh"></video>
+      </div>`;
+    document.body.appendChild(overlay);
+  } else {
+    showToast('Could not load video');
+  }
+};
+
+// ── BOOT ──────────────────────────────────────────────────────
+init();
+</script>
+
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+}
+</script>
+</body>
+</html>

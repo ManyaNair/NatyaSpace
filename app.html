@@ -34,6 +34,7 @@ async function init() {
   const { data: prof } = await sb.from('profiles').select('*').eq('id', session.user.id).single();
   S.profile = prof;
   if (prof?.role === 'student') { window.location.replace('./student.html'); return; }
+  if (prof?.role === 'parent')  { window.location.replace('./parent.html');  return; }
   await loadAll();
 }
 
@@ -87,6 +88,7 @@ function buildApp() {
         <div class="header-actions">
           <button class="btn btn-ghost btn-sm" onclick="OM('logClass',null)">+ Class</button>
           <button class="btn btn-primary btn-sm" onclick="OM('addStudent',null)">+ Student</button>
+          <button class="btn btn-ghost btn-sm" onclick="OM('inviteParent',null)">+ Parent</button>
           <button class="btn btn-ghost btn-sm" onclick="doLogout()" style="color:var(--text3)">Sign out</button>
         </div>
       </div>
@@ -655,6 +657,27 @@ function buildModal(){
     <button class="btn btn-primary" onclick="confirmUpload()">Upload</button>`;
   }
 
+  if(type==='inviteParent'){
+    const checks=S.students.map(s=>{
+      const sel=(S.selectedMemberIds||[]).includes(s.id);
+      return`<div class="check-item ${sel?'selected':''}" onclick="toggleMemberSel(${s.id})">
+        <div class="avatar ${s.color||'av-tan'}" style="width:32px;height:32px;font-size:11px">${ini(s.name)}</div>
+        <div class="check-item-name">${s.name}</div>
+        <div class="checkmark">${sel?'✓':''}</div>
+      </div>`;
+    }).join('');
+    title='Invite Parent';
+    body=`
+    <p style="font-size:13px;color:var(--text2);margin-bottom:16px;line-height:1.6">Create a parent login and link them to their children. They'll see classes, fees, and practice videos for each child.</p>
+    <div class="form-field"><label>Parent email</label><input id="m-parent-email" type="email" placeholder="parent@email.com"/></div>
+    <div class="form-field" style="margin-bottom:6px">
+      <label>Link to students</label>
+      <div class="check-list" style="max-height:200px">${checks}</div>
+    </div>`;
+    footer=`<button class="btn btn-ghost" onclick="CM()">Cancel</button>
+    <button class="btn btn-primary" onclick="doInviteParent()">Send invite</button>`;
+  }
+
   return`<div class="modal-overlay" onclick="if(event.target===this)CM()">
     <div class="modal">
       <div class="modal-handle"></div>
@@ -784,6 +807,34 @@ window.doInviteStudent = async studentId => {
   const newUserId=data.user?.id;
   if(newUserId){ await sb.from('students').update({user_id:newUserId}).eq('id',studentId); }
   showToast('Login created!'); CM(); await loadAll();
+};
+
+window.doInviteParent = async () => {
+  const email=document.getElementById('m-parent-email')?.value.trim();
+  if(!email){ showToast('Enter an email address'); return; }
+  if(!S.selectedMemberIds||S.selectedMemberIds.length===0){ showToast('Select at least one student to link'); return; }
+
+  // Create the parent account via signUp (sends confirmation email)
+  const{data,error}=await sb.auth.signUp({
+    email,
+    password: Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)+'A1!',
+    options:{
+      data:{ role:'parent' },
+      emailRedirectTo:`${window.location.origin}/set-password.html`
+    }
+  });
+  if(error){ showToast('Error: '+error.message); return; }
+
+  const parentUserId=data.user?.id;
+  if(!parentUserId){ showToast('Could not create account'); return; }
+
+  // Insert parent_student links
+  const links=S.selectedMemberIds.map(sid=>({ parent_id:parentUserId, student_id:sid }));
+  const{error:linkErr}=await sb.from('parent_student').insert(links);
+  if(linkErr){ showToast('Account created but linking failed: '+linkErr.message); return; }
+
+  showToast(`Invite sent to ${email}!`);
+  CM(); await loadAll();
 };
 
 window.doAddGroup = async () => {
